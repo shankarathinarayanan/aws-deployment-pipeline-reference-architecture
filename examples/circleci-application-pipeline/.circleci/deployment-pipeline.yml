@@ -1,12 +1,7 @@
 version: 2.1
 
-
 orbs:
-  #node: circleci/node@6.3.0
-  #trivy: cci-labs/trivy@1.0.0
-  #aws-cli: circleci/aws-cli@5.1.1
-  #ggshield: gitguardian/ggshield@1.1.4
-
+  jira: circleci/jira@2.2.1
 
 parameters:
   aws-account-id:
@@ -18,7 +13,6 @@ parameters:
   working-dir:
     type: string
     default: ~/aws-deployment-pipeline-reference-architecture/examples/circleci-application-pipeline
-
 
 commands:
   install-cdk:
@@ -42,7 +36,6 @@ commands:
                 name: "Installing AWS CDK Lib"
                 command: sudo npm install aws-cdk-lib
 
-
 jobs:
   synth:
     docker:
@@ -51,9 +44,6 @@ jobs:
     steps:
       - checkout:
           path: ~/aws-deployment-pipeline-reference-architecture
-      - node/install-packages:
-          with-cache: true
-          cache-path: << pipeline.parameters.working-dir >>/node_modules
       - run:
           name: Audit and Fix Dependencies
           command: |
@@ -80,58 +70,31 @@ jobs:
     steps:
       - checkout:
           path: ~/aws-deployment-pipeline-reference-architecture
-      - trivy/scan:
-          scan-type: fs
-          ignore-unfixed: true
-          format: sarif
-          output: << pipeline.parameters.working-dir >>/report.sarif
-          scanners: vuln,secret,misconfig,license
+      - run:
+          name: Run Trivy Scan
+          command: |
+            trivy fs --scan-type vuln,secret,misconfig,license --ignore-unfixed --format sarif --output << pipeline.parameters.working-dir >>/report.sarif
       - store_artifacts:
           path: << pipeline.parameters.working-dir >>/report.sarif
-    environment:
-      TRIVY_DB_REPOSITORY: public.ecr.aws/aquasecurity/trivy-db
 
   package:
     docker:
       - image: cimg/openjdk:17.0
     working_directory: << pipeline.parameters.working-dir >>
-    environment:
-      TRIVY_DB_REPOSITORY: public.ecr.aws/aquasecurity/trivy-db
     steps:
       - checkout:
           path: ~/aws-deployment-pipeline-reference-architecture
-      - restore_cache:
-          keys:
-            - maven-repo-v1-{{ checksum "pom.xml" }}
       - run:
           name: Run Maven Verify
           command: mvn verify --batch-mode --no-transfer-progress
-      - save_cache:
-          paths:
-            - ~/.m2/repository
-          key: maven-repo-v1-{{ checksum "pom.xml" }}
       - trivy/scan:
           scan-type: fs
           ignore-unfixed: true
           format: spdx-json
           output: << pipeline.parameters.working-dir >>/dependency-results.sbom.json
-      - store_test_results:
-          path: << pipeline.parameters.working-dir >>/target/surefire-reports
-      - store_test_results:
-          path: << pipeline.parameters.working-dir >>/target/soapui-reports
       - store_artifacts:
           path: << pipeline.parameters.working-dir >>/dependency-results.sbom.json
-      - store_artifacts:
-          path: << pipeline.parameters.working-dir >>/target/spotbugsXml.xml    
-      - store_artifacts:
-          path: << pipeline.parameters.working-dir >>/target/jmeter/results
-      - store_artifacts:
-          path: << pipeline.parameters.working-dir >>/target/fruit-api.jar
-      - persist_to_workspace:
-          root: << pipeline.parameters.working-dir >>
-          paths:
-            - target/fruit-api.jar
-  
+
   deploy:
     docker:
       - image: cimg/aws:2024.03
@@ -152,15 +115,6 @@ jobs:
     steps:
       - checkout:
           path: ~/aws-deployment-pipeline-reference-architecture
-      - attach_workspace:
-          at: << pipeline.parameters.working-dir >>
-      - setup_remote_docker:
-          docker_layer_caching: true
-      - aws-cli/setup:
-          profile_name: default
-          role_arn: << pipeline.parameters.aws-role-arn >>
-          role_session_name: default
-      - install-cdk
       - run:
           name: Set CDK Env Vars
           command: |
@@ -177,15 +131,8 @@ jobs:
               --context << parameters.cdk-context >> \
               --require-approval never
           no_output_timeout: 20m
-      - run:
-          name: Track Release in CircleCI
-          command: circleci run release log --environment-name=<< parameters.environment >> --component-name=<< parameters.stack-name >> --target-version=<< parameters.region >>-${CIRCLE_BUILD_NUM}
       - store_artifacts:
           path: << pipeline.parameters.working-dir >>/<< parameters.environment >>-<< parameters.region >>-cdk-output.json
-      - persist_to_workspace:
-          root: << pipeline.parameters.working-dir >>
-          paths:
-            - << parameters.environment >>-<< parameters.region >>-cdk-output.json
 
   test:
     docker:
@@ -197,48 +144,16 @@ jobs:
       region:
         type: string
         default: us-east-1
-      threads:
-        type: integer
-        default: 300
-      duration:
-        type: integer
-        default: 300
-      throughput:
-        type: integer
-        default: 6000
     working_directory: << pipeline.parameters.working-dir >>
     steps:
       - checkout:
           path: ~/aws-deployment-pipeline-reference-architecture
-      - attach_workspace:
-          at: << pipeline.parameters.working-dir >>
-      - run:
-          name: Extract endpointUrl from CDK Output
-          command: |
-            # Extract the endpointUrl from the CDK output JSON
-            if [ -f << parameters.environment >>-<< parameters.region >>-cdk-output.json ]; then
-              endpoint_url=$(jq -r '.["fruit-api"].endpointUrl' << parameters.environment >>-<< parameters.region >>-cdk-output.json)
-              echo "export ENDPOINT_URL=$endpoint_url" >> $BASH_ENV
-              echo "Endpoint URL extracted: $endpoint_url"
-            else
-              echo "CDK output file not found."
-              exit 1
-            fi
-      - restore_cache:
-          keys:
-            - maven-repo-v1-{{ checksum "pom.xml" }}
       - run:
           name: Run SoapUI Tests against << parameters.environment >>
-          command: mvn --batch-mode --no-transfer-progress soapui:test -Dsoapui.endpoint=${ENDPOINT_URL}
+          command: mvn --batch-mode --no-transfer-progress soapui:test
       - run:
           name: Run JMeter Tests against << parameters.environment >>
-          command: mvn --batch-mode --no-transfer-progress compile jmeter:jmeter jmeter:results -Djmeter.endpoint=${ENDPOINT_URL} -Djmeter.threads=<< parameters.threads >> -Djmeter.duration=<< parameters.duration >> -Djmeter.throughput=<< parameters.throughput >>
-      - save_cache:
-          paths:
-            - ~/.m2/repository
-          key: maven-repo-v1-{{ checksum "pom.xml" }}      
-      - store_test_results:
-          path: << pipeline.parameters.working-dir >>/target/soapui-reports
+          command: mvn --batch-mode --no-transfer-progress compile jmeter:jmeter jmeter:results
       - store_artifacts:
           path: << pipeline.parameters.working-dir >>/target/jmeter/results
 
@@ -265,7 +180,6 @@ jobs:
               curl -X POST https://circleci.com/api/v1.1/project/circleci/${ORG_SLUG}/${PROJECT_SLUG}/${CIRCLE_BUILD_NUM}/cancel -H "Circle-Token: ${CANCEL_JOB}"
             fi
 
-
 workflows:
   pr_pipeline:
     when:
@@ -275,10 +189,8 @@ workflows:
       - check-pr:
           name: Checking PR Event
           context: dpra-cancel
-      - ggshield/scan:
-          name: Scanning for Secrets with GitGuardian
-          revision: <<pipeline.git.revision>>
-          context: dpra-gitguardian
+      - jira/create-issue:
+          name: Create Jira Issue for PR
           requires:
             - Checking PR Event
       - synth:
@@ -299,10 +211,8 @@ workflows:
       and:
         - equal: ["github_app", "<< pipeline.trigger_parameters.circleci.trigger_type >>"]
     jobs:
-      - ggshield/scan:
-          name: Scanning for Secrets with GitGuardian
-          revision: <<pipeline.git.revision>>
-          context: dpra-gitguardian
+      - jira/create-issue:
+          name: Create Jira Issue for Deployment
       - synth:
           name: Verify CDK Synth
       - trivy:
@@ -315,7 +225,6 @@ workflows:
             - Verify CDK Synth
             - Run Trivy Scan
             - Build Application
-            - Scanning for Secrets with GitGuardian
       - test:
           name: Beta Test
           environment: Beta
@@ -329,10 +238,6 @@ workflows:
               region: [us-east-1, us-west-2]
           requires:
             - "Beta Test"
-          filters:
-            branches:
-              only:
-                - main
       - test:
           name: "<< matrix.environment >> << matrix.region>> Test"
           matrix:
@@ -340,21 +245,13 @@ workflows:
               environment: [Gamma]
               region: [us-east-1, us-west-2]
           requires:
-            - << matrix.environment >> << matrix.region>> Deploy
-          filters:
-            branches:
-              only:
-                - main
+            - "<< matrix.environment >> << matrix.region>> Deploy"
       - hold:
           type: approval
           name: Approval for Production Deploy
           requires:
             - "Gamma us-east-1 Test"
             - "Gamma us-west-2 Test"
-          filters:
-            branches:
-              only:
-                - main
       - deploy:
           name: "<< matrix.environment >> << matrix.region>> Deploy"
           matrix:
@@ -363,10 +260,6 @@ workflows:
               region: [us-east-1, us-west-2]
           requires:
             - "Approval for Production Deploy"
-          filters:
-            branches:
-              only:
-                - main
       - test:
           name: "<< matrix.environment >> << matrix.region>> Test"
           matrix:
@@ -374,8 +267,4 @@ workflows:
               environment: [Production]
               region: [us-east-1, us-west-2]
           requires:
-            - << matrix.environment >> << matrix.region>> Deploy
-          filters:
-            branches:
-              only:
-                - main
+            - "<< matrix.environment >> << matrix.region>> Deploy"
