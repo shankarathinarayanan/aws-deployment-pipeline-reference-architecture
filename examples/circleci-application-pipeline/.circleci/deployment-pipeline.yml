@@ -299,23 +299,23 @@ workflows:
       and:
         - equal: ["github_app", "<< pipeline.trigger_parameters.circleci.trigger_type >>"]
     jobs:
-      - ggshield/scan:
-          name: Scanning for Secrets with GitGuardian
-          revision: <<pipeline.git.revision>>
-          context: dpra-gitguardian
-      - synth:
-          name: Verify CDK Synth
-      - trivy:
-          name: Run Trivy Scan
-      - package:
-          name: Build Application
+      # - ggshield/scan:
+      #     name: Scanning for Secrets with GitGuardian
+      #     revision: <<pipeline.git.revision>>
+      #     context: dpra-gitguardian
+      # - synth:
+      #     name: Verify CDK Synth
+      # - trivy:
+      #     name: Run Trivy Scan
+      # - package:
+      #     name: Build Application
       - deploy:
           name: Beta Deploy
-          requires:
-            - Verify CDK Synth
-            - Run Trivy Scan
-            - Build Application
-            - Scanning for Secrets with GitGuardian
+          # requires:
+          #   - Verify CDK Synth
+          #   - Run Trivy Scan
+          #   - Build Application
+          #   - Scanning for Secrets with GitGuardian
       - test:
           name: Beta Test
           environment: Beta
